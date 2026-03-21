@@ -11,9 +11,15 @@ const ICE_SERVERS = {
 export function usePeerConnection({ code, role, localStream }) {
   const pcRef             = useRef(null);
   const [remoteStream, setRemoteStream] = useState(null);
-  const [peerStatus, setPeerStatus]     = useState('waiting'); // waiting | connected | disconnected
+  const [peerStatus, setPeerStatus]     = useState('waiting');
 
   const createPC = useCallback(() => {
+    // Close any existing connection first
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+
     const pc = new RTCPeerConnection(ICE_SERVERS);
 
     pc.onicecandidate = ({ candidate }) => {
@@ -31,7 +37,6 @@ export function usePeerConnection({ code, role, localStream }) {
       }
     };
 
-    // Add local tracks
     if (localStream) {
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
     }
@@ -40,12 +45,11 @@ export function usePeerConnection({ code, role, localStream }) {
     return pc;
   }, [code, localStream]);
 
-  // ── SIGNALLING LISTENERS ───────────────────────────────────────────────────
   useEffect(() => {
     if (!code || !localStream) return;
 
     const onPeerJoined = async ({ role: joinedRole }) => {
-      // The creator (deaf) makes the offer when hearing joins
+      // Deaf user always creates the offer
       if (role === 'deaf') {
         const pc = createPC();
         const offer = await pc.createOffer();
@@ -76,18 +80,21 @@ export function usePeerConnection({ code, role, localStream }) {
       setRemoteStream(null);
     };
 
-    socket.on('peer:joined',  onPeerJoined);
-    socket.on('rtc:offer',    onOffer);
-    socket.on('rtc:answer',   onAnswer);
-    socket.on('rtc:ice',      onIce);
-    socket.on('peer:left',    onPeerLeft);
+    socket.on('peer:joined', onPeerJoined);
+    socket.on('rtc:offer',   onOffer);
+    socket.on('rtc:answer',  onAnswer);
+    socket.on('rtc:ice',     onIce);
+    socket.on('peer:left',   onPeerLeft);
+
+    // Fire room:ready so server re-sends peer:joined if partner already connected
+    socket.emit('room:ready', { code, role });
 
     return () => {
-      socket.off('peer:joined',  onPeerJoined);
-      socket.off('rtc:offer',    onOffer);
-      socket.off('rtc:answer',   onAnswer);
-      socket.off('rtc:ice',      onIce);
-      socket.off('peer:left',    onPeerLeft);
+      socket.off('peer:joined', onPeerJoined);
+      socket.off('rtc:offer',   onOffer);
+      socket.off('rtc:answer',  onAnswer);
+      socket.off('rtc:ice',     onIce);
+      socket.off('peer:left',   onPeerLeft);
       pcRef.current?.close();
     };
   }, [code, role, localStream, createPC]);

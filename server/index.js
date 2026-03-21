@@ -5,11 +5,17 @@ const cors     = require('cors');
 
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, {
-  cors: { origin: 'http://localhost:5173', methods: ['GET','POST'] }
+
+const ALLOWED_ORIGINS = [
+  'http://localhost:5173',
+  process.env.CLIENT_URL,
+].filter(Boolean);
+
+const io = new Server(server, {
+  cors: { origin: ALLOWED_ORIGINS, methods: ['GET','POST'] }
 });
 
-app.use(cors({ origin: 'http://localhost:5173' }));
+app.use(cors({ origin: ALLOWED_ORIGINS }));
 app.use(express.json());
 
 const rooms = {};
@@ -24,6 +30,7 @@ function roomOf(socketId) {
   );
 }
 
+app.get('/', (_, res) => res.json({ app: 'GestureSpeak', status: 'running' }));
 app.get('/api/health', (_, res) => res.json({ status: 'ok', rooms: Object.keys(rooms).length }));
 
 io.on('connection', (socket) => {
@@ -34,7 +41,6 @@ io.on('connection', (socket) => {
     rooms[code] = { deaf: null, hearing: null, logs: [] };
     rooms[code][role] = socket.id;
     socket.join(code);
-    console.log('[ROOM] created', code, 'by', role);
     cb({ code });
   });
 
@@ -44,9 +50,27 @@ io.on('connection', (socket) => {
     if (room[role])  return cb({ error: role + ' seat already taken' });
     room[role] = socket.id;
     socket.join(code);
-    console.log('[ROOM]', role, 'joined', code);
+
+    // Tell the OTHER person a partner arrived
     socket.to(code).emit('peer:joined', { role });
+
+    // Also tell the JOINER that the other person is already there
+    const otherRole = role === 'deaf' ? 'hearing' : 'deaf';
+    if (room[otherRole]) {
+      socket.emit('peer:joined', { role: otherRole });
+    }
+
     cb({ ok: true });
+  });
+
+  // Explicit ready signal — client emits this after WebRTC listeners are set up
+  socket.on('room:ready', ({ code, role }) => {
+    const room = rooms[code];
+    if (!room) return;
+    const otherRole = role === 'deaf' ? 'hearing' : 'deaf';
+    if (room[otherRole]) {
+      socket.emit('peer:joined', { role: otherRole });
+    }
   });
 
   socket.on('rtc:offer',  ({ code, offer })     => socket.to(code).emit('rtc:offer',  { offer }));
@@ -65,16 +89,15 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    console.log('[-]', socket.id);
     const found = roomOf(socket.id);
     if (!found) return;
     const [code, room] = found;
     const role = room.deaf === socket.id ? 'deaf' : 'hearing';
     room[role] = null;
     socket.to(code).emit('peer:left', { role });
-    if (!room.deaf && !room.hearing) { delete rooms[code]; }
+    if (!room.deaf && !room.hearing) delete rooms[code];
   });
 });
 
 const PORT = process.env.PORT || 4000;
-server.listen(PORT, '0.0.0.0',() => console.log('\n🚀 GestureSpeak server  http://localhost:' + PORT + '\n'));
+server.listen(PORT,'0.0.0.0', () => console.log('GestureSpeak server running on port ' + PORT));
