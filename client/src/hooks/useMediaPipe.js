@@ -1,16 +1,24 @@
 import { useEffect, useRef, useCallback } from 'react';
 
-export function useMediaPipe({ onResults, enabled }) {
-  const videoRef = useRef(null);
+export function useMediaPipe({ onResults, enabled, stream }) {
+  const videoRef  = useRef(null);
   const canvasRef = useRef(null);
-  const handsRef = useRef(null);
+  const handsRef  = useRef(null);
   const cameraRef = useRef(null);
+  const startedRef = useRef(false);
 
   const startCamera = useCallback(async () => {
-    if (!videoRef.current || !canvasRef.current) return;
+    if (startedRef.current) return;
+    if (!videoRef.current || !stream) return;
+
+    startedRef.current = true;
+
+    // Attach stream to hidden video element so MediaPipe can read frames
+    videoRef.current.srcObject = stream;
+    await videoRef.current.play().catch(() => {});
 
     const { Hands, HAND_CONNECTIONS } = await import('@mediapipe/hands');
-    const { Camera } = await import('@mediapipe/camera_utils');
+    const { Camera }                  = await import('@mediapipe/camera_utils');
     const { drawConnectors, drawLandmarks } = await import('@mediapipe/drawing_utils');
 
     const hands = new Hands({
@@ -40,10 +48,10 @@ export function useMediaPipe({ onResults, enabled }) {
         const lm = results.multiHandLandmarks[0];
         drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: 'rgba(99,179,237,0.55)', lineWidth: 2 });
         drawLandmarks(ctx, lm, { color: '#63b3ed', lineWidth: 1, radius: 3 });
-        if (enabled) onResults({ hasHand: true, landmarks: lm });
-      } else {
-        if (enabled) onResults({ hasHand: false, landmarks: null });
       }
+
+      // Always call onResults — enabled check happens in CallRoom
+      onResults({ hasHand, landmarks: hasHand ? results.multiHandLandmarks[0] : null });
     });
 
     handsRef.current = hands;
@@ -58,14 +66,15 @@ export function useMediaPipe({ onResults, enabled }) {
 
     await camera.start();
     cameraRef.current = camera;
-  }, [onResults, enabled]);
+  }, [stream, onResults]);
 
   useEffect(() => {
-    startCamera();
+    if (stream) startCamera();
     return () => {
       cameraRef.current?.stop?.();
+      startedRef.current = false;
     };
-  }, [startCamera]);
+  }, [stream, startCamera]);
 
   return { videoRef, canvasRef };
 }

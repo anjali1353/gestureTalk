@@ -15,7 +15,7 @@ const SPEAK_COOLDOWN = 2200;
 export default function CallRoom({ code, role, onLeave }) {
   const isDeaf = role === 'deaf';
 
-  const [detecting,       setDetecting]       = useState(false);
+  const [detecting,       setDetecting]       = useState(true);
   const [voiceOn,         setVoiceOn]         = useState(true);
   const [detectedGesture, setDetectedGesture] = useState(null);
   const [confidence,      setConfidence]      = useState(0);
@@ -25,16 +25,16 @@ export default function CallRoom({ code, role, onLeave }) {
   const [peerLabel,       setPeerLabel]       = useState(isDeaf ? 'Hearing partner' : 'Deaf partner');
   const [callLog,         setCallLog]         = useState([]);
 
-  const lastGestureRef  = useRef(null);
-  const lastTimeRef     = useRef(0);
-  const localVideoRef   = useRef(null); // separate ref for deaf local preview
+  const lastGestureRef = useRef(null);
+  const lastTimeRef    = useRef(0);
+  const localVideoRef  = useRef(null);
 
   const { stream: localStream, error: streamError } = useLocalStream();
   const { remoteStream, peerStatus } = usePeerConnection({ code, role, localStream });
-  const { speak }       = useVoice();
-  const { logGesture }  = useGestureLogger();
+  const { speak }      = useVoice();
+  const { logGesture } = useGestureLogger();
 
-  // Attach localStream to deaf user's own preview video
+  // Show local camera preview immediately
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
@@ -42,9 +42,14 @@ export default function CallRoom({ code, role, onLeave }) {
   }, [localStream]);
 
   const handleResults = useCallback(({ hasHand, landmarks }) => {
-    if (!hasHand || !landmarks || !detecting) {
-      setDetectedGesture(null); setConfidence(0); return;
+    if (!detecting || !isDeaf) return;
+
+    if (!hasHand || !landmarks) {
+      setDetectedGesture(null);
+      setConfidence(0);
+      return;
     }
+
     const { gesture, confidence: conf } = classifyGesture(landmarks);
     if (!gesture) { setDetectedGesture(null); setConfidence(0); return; }
 
@@ -61,15 +66,15 @@ export default function CallRoom({ code, role, onLeave }) {
       setCallLog(prev => [entry, ...prev].slice(0, 100));
       logGesture(gesture, conf);
     }
-  }, [detecting, code, logGesture]);
+  }, [detecting, isDeaf, code, logGesture]);
 
-  // useMediaPipe gives us videoRef (for MediaPipe) and canvasRef (for skeleton)
+  // Pass localStream directly so MediaPipe reads real camera frames
   const { videoRef: mpVideoRef, canvasRef } = useMediaPipe({
     onResults: handleResults,
     enabled: detecting && isDeaf,
+    stream: isDeaf ? localStream : null,
   });
 
-  // Socket listeners
   useEffect(() => {
     socket.on('gesture:incoming', (entry) => {
       setLatestIncoming(entry);
@@ -106,8 +111,6 @@ export default function CallRoom({ code, role, onLeave }) {
 
   return (
     <div className="call-room">
-
-      {/* Header */}
       <div className="call-header">
         <div className="logo">Gesture<span>Speak</span>
           <span className="room-pill">{code}</span>
@@ -136,11 +139,10 @@ export default function CallRoom({ code, role, onLeave }) {
         </div>
       </div>
 
-      {/* Main grid */}
       <div className="call-grid">
         <div className="videos-col">
 
-          {/* Remote video — big tile */}
+          {/* Remote video */}
           <VideoTile stream={remoteStream} label={peerLabel}>
             {!isDeaf && latestIncoming && (
               <TranslationOverlay latestGesture={latestIncoming} voiceOn={voiceOn} />
@@ -150,24 +152,21 @@ export default function CallRoom({ code, role, onLeave }) {
             )}
           </VideoTile>
 
-          {/* Local video — small tile */}
+          {/* Local video */}
           <div className="local-video-wrap">
             {isDeaf ? (
               <div className="video-tile small">
-                {/* localVideoRef shows the camera preview visually */}
-                <video
-                  ref={localVideoRef}
-                  autoPlay muted playsInline
-                  style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }}
-                />
-                {/* mpVideoRef is hidden — used only by MediaPipe for gesture processing */}
-                <video
-                  ref={mpVideoRef}
-                  autoPlay muted playsInline
-                  style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }}
-                />
+                {/* Visible preview — always shows camera */}
+                <video ref={localVideoRef} autoPlay muted playsInline
+                  style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                {/* Hidden video for MediaPipe — reads same stream */}
+                <video ref={mpVideoRef} autoPlay muted playsInline
+                  style={{ position: 'absolute', opacity: 0, width: 1, height: 1, pointerEvents: 'none' }} />
+                {/* Canvas draws skeleton on top of visible preview */}
                 <canvas ref={canvasRef} className="canvas-el" />
-                <div className="video-label">You (deaf)</div>
+                <div className="video-label">
+                  You (deaf) {detecting ? '🔴 detecting' : '⏸ paused'}
+                </div>
                 {detectedGesture && detecting && (
                   <div className="self-gesture-badge">{detectedGesture} · {Math.round(confidence * 100)}%</div>
                 )}
@@ -177,7 +176,6 @@ export default function CallRoom({ code, role, onLeave }) {
             )}
           </div>
 
-          {/* Hearing reply bar */}
           {!isDeaf && (
             <div className="reply-bar">
               <input
@@ -192,7 +190,6 @@ export default function CallRoom({ code, role, onLeave }) {
           )}
         </div>
 
-        {/* Sidebar */}
         <div className="call-sidebar">
           {isDeaf && <GestureGuide active={detectedGesture} />}
           <div className="call-log-panel">
