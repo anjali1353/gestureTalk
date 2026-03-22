@@ -1,7 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import VideoTile           from './VideoTile';
 import TranslationOverlay  from './TranslationOverlay';
-import ConversationLog     from './ConversationLog';
 import GestureGuide        from './GestureGuide';
 import { useLocalStream }      from '../hooks/useLocalStream';
 import { usePeerConnection }   from '../hooks/usePeerConnection';
@@ -14,9 +13,8 @@ import socket from '../utils/socket';
 const SPEAK_COOLDOWN = 2200;
 
 export default function CallRoom({ code, role, onLeave }) {
-  const isDeaf    = role === 'deaf';
+  const isDeaf = role === 'deaf';
 
-  // ── STATE ──────────────────────────────────────────────────────────────────
   const [detecting,       setDetecting]       = useState(false);
   const [voiceOn,         setVoiceOn]         = useState(true);
   const [detectedGesture, setDetectedGesture] = useState(null);
@@ -27,16 +25,21 @@ export default function CallRoom({ code, role, onLeave }) {
   const [peerLabel,       setPeerLabel]       = useState(isDeaf ? 'Hearing partner' : 'Deaf partner');
   const [callLog,         setCallLog]         = useState([]);
 
-  const lastGestureRef = useRef(null);
-  const lastTimeRef    = useRef(0);
+  const lastGestureRef  = useRef(null);
+  const lastTimeRef     = useRef(0);
+  const localVideoRef   = useRef(null); // separate ref for deaf local preview
 
-  // ── STREAMS + WEBRTC ───────────────────────────────────────────────────────
   const { stream: localStream, error: streamError } = useLocalStream();
   const { remoteStream, peerStatus } = usePeerConnection({ code, role, localStream });
+  const { speak }       = useVoice();
+  const { logGesture }  = useGestureLogger();
 
-  // ── MEDIAPIPE (deaf only) ──────────────────────────────────────────────────
-  const { speak } = useVoice();
-  const { logGesture } = useGestureLogger();
+  // Attach localStream to deaf user's own preview video
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
 
   const handleResults = useCallback(({ hasHand, landmarks }) => {
     if (!hasHand || !landmarks || !detecting) {
@@ -53,41 +56,33 @@ export default function CallRoom({ code, role, onLeave }) {
     if (isNew) {
       lastGestureRef.current = gesture;
       lastTimeRef.current    = now;
-
-      // Emit to server → relay to hearing partner
       socket.emit('gesture:detected', { code, gesture, confidence: conf });
-
-      // Own log entry
       const entry = { gesture, confidence: conf, timestamp: new Date().toISOString(), id: Date.now(), source: 'self' };
       setCallLog(prev => [entry, ...prev].slice(0, 100));
       logGesture(gesture, conf);
     }
   }, [detecting, code, logGesture]);
 
-  const { videoRef, canvasRef } = useMediaPipe({
+  // useMediaPipe gives us videoRef (for MediaPipe) and canvasRef (for skeleton)
+  const { videoRef: mpVideoRef, canvasRef } = useMediaPipe({
     onResults: handleResults,
     enabled: detecting && isDeaf,
   });
 
-  // ── SOCKET LISTENERS ───────────────────────────────────────────────────────
+  // Socket listeners
   useEffect(() => {
-    // Hearing side: receive gesture from deaf partner
     socket.on('gesture:incoming', (entry) => {
       setLatestIncoming(entry);
       setCallLog(prev => [{ ...entry, source: 'partner' }, ...prev].slice(0, 100));
     });
-
-    // Deaf side: receive typed reply from hearing partner
     socket.on('reply:incoming', ({ text, timestamp }) => {
       setReplyDisplay(text);
       setCallLog(prev => [{ gesture: `"${text}"`, confidence: 1, timestamp, id: Date.now(), source: 'reply' }, ...prev].slice(0, 100));
       setTimeout(() => setReplyDisplay(''), 6000);
     });
-
     socket.on('peer:joined', ({ role: r }) => {
       setPeerLabel(r === 'deaf' ? 'Deaf partner' : 'Hearing partner');
     });
-
     return () => {
       socket.off('gesture:incoming');
       socket.off('reply:incoming');
@@ -95,7 +90,6 @@ export default function CallRoom({ code, role, onLeave }) {
     };
   }, []);
 
-  // ── REPLY (hearing → deaf) ─────────────────────────────────────────────────
   const sendReply = () => {
     if (!replyText.trim()) return;
     socket.emit('reply:send', { code, text: replyText.trim() });
@@ -106,7 +100,6 @@ export default function CallRoom({ code, role, onLeave }) {
     setReplyText('');
   };
 
-  // ── RENDER ─────────────────────────────────────────────────────────────────
   if (streamError) return (
     <div className="call-error">Camera error: {streamError}. Please allow camera access and reload.</div>
   );
@@ -122,8 +115,8 @@ export default function CallRoom({ code, role, onLeave }) {
         <div className="call-header-center">
           <div className={`peer-status ${peerStatus}`}>
             <span className="peer-dot" />
-            {peerStatus === 'connected'     ? `Connected with ${peerLabel}` :
-             peerStatus === 'disconnected'  ? `${peerLabel} left` :
+            {peerStatus === 'connected'    ? `Connected with ${peerLabel}` :
+             peerStatus === 'disconnected' ? `${peerLabel} left` :
              `Waiting for ${peerLabel}…`}
           </div>
         </div>
@@ -136,10 +129,7 @@ export default function CallRoom({ code, role, onLeave }) {
               {detecting ? '⏹ Stop' : '▶ Detect'}
             </button>
           )}
-          <button
-            className={`ctrl-btn ${voiceOn ? 'active' : ''}`}
-            onClick={() => setVoiceOn(v => !v)}
-          >
+          <button className={`ctrl-btn ${voiceOn ? 'active' : ''}`} onClick={() => setVoiceOn(v => !v)}>
             {voiceOn ? '🔊' : '🔇'}
           </button>
           <button className="ctrl-btn danger" onClick={onLeave}>Leave</button>
@@ -148,30 +138,34 @@ export default function CallRoom({ code, role, onLeave }) {
 
       {/* Main grid */}
       <div className="call-grid">
-
-        {/* Left: videos */}
         <div className="videos-col">
 
-          {/* Remote video (big) */}
+          {/* Remote video — big tile */}
           <VideoTile stream={remoteStream} label={peerLabel}>
-            {/* Hearing side: show translation overlay on top of deaf person's video */}
             {!isDeaf && latestIncoming && (
-              <TranslationOverlay
-                latestGesture={latestIncoming}
-                voiceOn={voiceOn}
-              />
+              <TranslationOverlay latestGesture={latestIncoming} voiceOn={voiceOn} />
             )}
-            {/* Deaf side: show reply from hearing person */}
             {isDeaf && replyDisplay && (
               <div className="reply-overlay">{replyDisplay}</div>
             )}
           </VideoTile>
 
-          {/* Local video (small, deaf has canvas overlay) */}
+          {/* Local video — small tile */}
           <div className="local-video-wrap">
             {isDeaf ? (
               <div className="video-tile small">
-                <video ref={videoRef} autoPlay muted playsInline style={{ transform: 'scaleX(-1)' }} />
+                {/* localVideoRef shows the camera preview visually */}
+                <video
+                  ref={localVideoRef}
+                  autoPlay muted playsInline
+                  style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover' }}
+                />
+                {/* mpVideoRef is hidden — used only by MediaPipe for gesture processing */}
+                <video
+                  ref={mpVideoRef}
+                  autoPlay muted playsInline
+                  style={{ position: 'absolute', opacity: 0, pointerEvents: 'none', width: 1, height: 1 }}
+                />
                 <canvas ref={canvasRef} className="canvas-el" />
                 <div className="video-label">You (deaf)</div>
                 {detectedGesture && detecting && (
@@ -183,7 +177,7 @@ export default function CallRoom({ code, role, onLeave }) {
             )}
           </div>
 
-          {/* Hearing: type reply */}
+          {/* Hearing reply bar */}
           {!isDeaf && (
             <div className="reply-bar">
               <input
@@ -198,7 +192,7 @@ export default function CallRoom({ code, role, onLeave }) {
           )}
         </div>
 
-        {/* Right: guide + log */}
+        {/* Sidebar */}
         <div className="call-sidebar">
           {isDeaf && <GestureGuide active={detectedGesture} />}
           <div className="call-log-panel">
@@ -222,7 +216,6 @@ export default function CallRoom({ code, role, onLeave }) {
             </div>
           </div>
         </div>
-
       </div>
     </div>
   );
