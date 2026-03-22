@@ -34,21 +34,17 @@ export default function CallRoom({ code, role, onLeave }) {
   const { speak }      = useVoice();
   const { logGesture } = useGestureLogger();
 
-  // Show local camera preview immediately
+  // Always show local camera preview
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.play().catch(() => {});
     }
   }, [localStream]);
 
   const handleResults = useCallback(({ hasHand, landmarks }) => {
     if (!detecting || !isDeaf) return;
-
-    if (!hasHand || !landmarks) {
-      setDetectedGesture(null);
-      setConfidence(0);
-      return;
-    }
+    if (!hasHand || !landmarks) { setDetectedGesture(null); setConfidence(0); return; }
 
     const { gesture, confidence: conf } = classifyGesture(landmarks);
     if (!gesture) { setDetectedGesture(null); setConfidence(0); return; }
@@ -68,7 +64,6 @@ export default function CallRoom({ code, role, onLeave }) {
     }
   }, [detecting, isDeaf, code, logGesture]);
 
-  // Pass localStream directly so MediaPipe reads real camera frames
   const { videoRef: mpVideoRef, canvasRef } = useMediaPipe({
     onResults: handleResults,
     enabled: detecting && isDeaf,
@@ -98,10 +93,7 @@ export default function CallRoom({ code, role, onLeave }) {
   const sendReply = () => {
     if (!replyText.trim()) return;
     socket.emit('reply:send', { code, text: replyText.trim() });
-    setCallLog(prev => [{
-      gesture: `"${replyText.trim()}"`, confidence: 1,
-      timestamp: new Date().toISOString(), id: Date.now(), source: 'self-reply'
-    }, ...prev].slice(0, 100));
+    setCallLog(prev => [{ gesture: `"${replyText.trim()}"`, confidence: 1, timestamp: new Date().toISOString(), id: Date.now(), source: 'self-reply' }, ...prev].slice(0, 100));
     setReplyText('');
   };
 
@@ -111,6 +103,8 @@ export default function CallRoom({ code, role, onLeave }) {
 
   return (
     <div className="call-room">
+
+      {/* ── HEADER ── */}
       <div className="call-header">
         <div className="logo">Gesture<span>Speak</span>
           <span className="room-pill">{code}</span>
@@ -125,10 +119,7 @@ export default function CallRoom({ code, role, onLeave }) {
         </div>
         <div className="call-header-right">
           {isDeaf && (
-            <button
-              className={`ctrl-btn ${detecting ? 'stop' : 'start'}`}
-              onClick={() => setDetecting(d => !d)}
-            >
+            <button className={`ctrl-btn ${detecting ? 'stop' : 'start'}`} onClick={() => setDetecting(d => !d)}>
               {detecting ? '⏹ Stop' : '▶ Detect'}
             </button>
           )}
@@ -139,10 +130,13 @@ export default function CallRoom({ code, role, onLeave }) {
         </div>
       </div>
 
+      {/* ── MAIN GRID ── */}
       <div className="call-grid">
-        <div className="videos-col">
 
-          {/* Remote video */}
+        {/* ── VIDEO COLUMN ── */}
+        <div className={isDeaf ? 'videos-col' : 'videos-col-hearing'}>
+
+          {/* Remote video — top half */}
           <VideoTile stream={remoteStream} label={peerLabel}>
             {!isDeaf && latestIncoming && (
               <TranslationOverlay latestGesture={latestIncoming} voiceOn={voiceOn} />
@@ -152,20 +146,17 @@ export default function CallRoom({ code, role, onLeave }) {
             )}
           </VideoTile>
 
-          {/* Local video */}
+          {/* Local video — bottom half */}
           <div className="local-video-wrap">
             {isDeaf ? (
-              <div className="video-tile small">
-                {/* Visible preview — always shows camera */}
+              <div className="video-tile" style={{ height: '100%' }}>
                 <video ref={localVideoRef} autoPlay muted playsInline
-                  style={{ transform: 'scaleX(-1)', width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
-                {/* Hidden video for MediaPipe — reads same stream */}
+                  style={{ width:'100%', height:'100%', objectFit:'cover', display:'block', transform:'scaleX(-1)' }} />
                 <video ref={mpVideoRef} autoPlay muted playsInline
-                  style={{ position: 'absolute', opacity: 0, width: 1, height: 1, pointerEvents: 'none' }} />
-                {/* Canvas draws skeleton on top of visible preview */}
+                  style={{ position:'absolute', opacity:0, width:1, height:1, pointerEvents:'none' }} />
                 <canvas ref={canvasRef} className="canvas-el" />
                 <div className="video-label">
-                  You (deaf) {detecting ? '🔴 detecting' : '⏸ paused'}
+                  You (deaf) {detecting ? '🔴' : '⏸'}
                 </div>
                 {detectedGesture && detecting && (
                   <div className="self-gesture-badge">{detectedGesture} · {Math.round(confidence * 100)}%</div>
@@ -176,20 +167,18 @@ export default function CallRoom({ code, role, onLeave }) {
             )}
           </div>
 
+          {/* Reply bar — hearing only, sits below local video */}
           {!isDeaf && (
             <div className="reply-bar">
-              <input
-                className="reply-input"
-                placeholder="Type a reply… (Enter to send)"
-                value={replyText}
-                onChange={e => setReplyText(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && sendReply()}
-              />
+              <input className="reply-input" placeholder="Type a reply… (Enter to send)"
+                value={replyText} onChange={e => setReplyText(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && sendReply()} />
               <button className="btn btn-primary" onClick={sendReply}>Send</button>
             </div>
           )}
         </div>
 
+        {/* ── SIDEBAR ── */}
         <div className="call-sidebar">
           {isDeaf && <GestureGuide active={detectedGesture} />}
           <div className="call-log-panel">
