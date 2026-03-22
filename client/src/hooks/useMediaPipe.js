@@ -1,80 +1,97 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef } from 'react';
 
 export function useMediaPipe({ onResults, enabled, stream }) {
-  const videoRef  = useRef(null);
-  const canvasRef = useRef(null);
-  const handsRef  = useRef(null);
-  const cameraRef = useRef(null);
-  const startedRef = useRef(false);
+  const videoRef    = useRef(null);
+  const canvasRef   = useRef(null);
+  const handsRef    = useRef(null);
+  const rafRef      = useRef(null);
+  const onResultsRef = useRef(onResults);
+  const enabledRef  = useRef(enabled);
 
-  const startCamera = useCallback(async () => {
-    if (startedRef.current) return;
-    if (!videoRef.current || !stream) return;
+  // Keep refs in sync without triggering re-init
+  useEffect(() => { onResultsRef.current = onResults; }, [onResults]);
+  useEffect(() => { enabledRef.current = enabled; },    [enabled]);
 
-    startedRef.current = true;
-
-    // Attach stream to hidden video element so MediaPipe can read frames
-    videoRef.current.srcObject = stream;
-    await videoRef.current.play().catch(() => {});
-
-    const { Hands, HAND_CONNECTIONS } = await import('@mediapipe/hands');
-    const { Camera }                  = await import('@mediapipe/camera_utils');
-    const { drawConnectors, drawLandmarks } = await import('@mediapipe/drawing_utils');
-
-    const hands = new Hands({
-      locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
-    });
-
-    hands.setOptions({
-      maxNumHands: 1,
-      modelComplexity: 1,
-      minDetectionConfidence: 0.65,
-      minTrackingConfidence: 0.55,
-    });
-
-    hands.onResults((results) => {
-      const canvas = canvasRef.current;
-      const video  = videoRef.current;
-      if (!canvas || !video) return;
-
-      const ctx = canvas.getContext('2d');
-      canvas.width  = video.videoWidth  || 640;
-      canvas.height = video.videoHeight || 480;
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      const hasHand = results.multiHandLandmarks?.length > 0;
-
-      if (hasHand) {
-        const lm = results.multiHandLandmarks[0];
-        drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: 'rgba(99,179,237,0.55)', lineWidth: 2 });
-        drawLandmarks(ctx, lm, { color: '#63b3ed', lineWidth: 1, radius: 3 });
-      }
-
-      // Always call onResults — enabled check happens in CallRoom
-      onResults({ hasHand, landmarks: hasHand ? results.multiHandLandmarks[0] : null });
-    });
-
-    handsRef.current = hands;
-
-    const camera = new Camera(videoRef.current, {
-      onFrame: async () => {
-        if (handsRef.current) await handsRef.current.send({ image: videoRef.current });
-      },
-      width: 640,
-      height: 480,
-    });
-
-    await camera.start();
-    cameraRef.current = camera;
-  }, [stream, onResults]);
-
+  // Init MediaPipe once when stream arrives
   useEffect(() => {
-    if (stream) startCamera();
+    if (!stream) return;
+
+    let hands = null;
+    let stopped = false;
+
+    async function init() {
+      // Attach stream to hidden video
+      const video = videoRef.current;
+      if (!video) return;
+      video.srcObject = stream;
+      video.muted = true;
+
+      await new Promise((res) => {
+        video.onloadedmetadata = res;
+        video.play().catch(() => {});
+      });
+
+      if (stopped) return;
+
+      const { Hands, HAND_CONNECTIONS }        = await import('@mediapipe/hands');
+      const { drawConnectors, drawLandmarks }  = await import('@mediapipe/drawing_utils');
+
+      hands = new Hands({
+        locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
+      });
+
+      hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 0,              // 0 = faster, good enough for 8 gestures
+        minDetectionConfidence: 0.6,
+        minTrackingConfidence: 0.5,
+      });
+
+      hands.onResults((results) => {
+        const canvas = canvasRef.current;
+        if (!canvas || !video) return;
+
+        const ctx = canvas.getContext('2d');
+        canvas.width  = video.videoWidth  || 640;
+        canvas.height = video.videoHeight || 480;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        const hasHand = results.multiHandLandmarks?.length > 0;
+
+        if (hasHand) {
+          const lm = results.multiHandLandmarks[0];
+          drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: 'rgba(99,179,237,0.7)', lineWidth: 2 });
+          drawLandmarks(ctx, lm,  { color: '#63b3ed', lineWidth: 1, radius: 3 });
+        }
+
+        onResultsRef.current({
+          hasHand,
+          landmarks: hasHand ? results.multiHandLandmarks[0] : null,
+        });
+      });
+
+      handsRef.current = hands;
+
+      // Manual rAF loop — avoids Camera utility conflicting with existing stream
+      async function loop() {
+        if (stopped) return;
+        if (hands && video.readyState >= 2) {
+          await hands.send({ image: video }).catch(() => {});
+        }
+        rafRef.current = requestAnimationFrame(loop);
+      }
+      loop();
+    }
+
+    init();
+
     return () => {
-      cameraRef.current?.stop?.();
-      startedRef.current = false;
+      stopped = true;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
+      hands?.close?.();
+      handsRef.current = null;
     };
-  }, [stream, startCamera]);
+  }, [stream]); // only re-init when stream changes
 
   return { videoRef, canvasRef };
 }
