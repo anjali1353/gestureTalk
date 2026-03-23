@@ -8,7 +8,7 @@ const ICE_SERVERS = {
   ],
 };
 
-export function usePeerConnection({ code, role, localStream }) {
+export function usePeerConnection({ code, role, localStream, onStatusChange }) {
   const pcRef             = useRef(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [peerStatus, setPeerStatus]     = useState('waiting');
@@ -28,12 +28,12 @@ export function usePeerConnection({ code, role, localStream }) {
 
     pc.ontrack = (e) => {
       setRemoteStream(e.streams[0]);
-      setPeerStatus('connected');
+      setPeerStatus('connected'); onStatusChange?.('connected');
     };
 
     pc.onconnectionstatechange = () => {
       if (['disconnected','failed','closed'].includes(pc.connectionState)) {
-        setPeerStatus('disconnected');
+        setPeerStatus('disconnected'); onStatusChange?.('disconnected');
       }
     };
 
@@ -76,7 +76,7 @@ export function usePeerConnection({ code, role, localStream }) {
     };
 
     const onPeerLeft = () => {
-      setPeerStatus('disconnected');
+      setPeerStatus('disconnected'); onStatusChange?.('disconnected');
       setRemoteStream(null);
     };
 

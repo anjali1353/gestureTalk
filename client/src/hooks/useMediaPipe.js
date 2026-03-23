@@ -6,107 +6,90 @@ export function useMediaPipe({ onResults, enabled, stream }) {
   const onResultsRef = useRef(onResults);
   const enabledRef   = useRef(enabled);
 
+  // Keep latest callbacks in refs — never re-trigger the init effect
   useEffect(() => { onResultsRef.current = onResults; }, [onResults]);
   useEffect(() => { enabledRef.current   = enabled;   }, [enabled]);
 
   useEffect(() => {
-    if (!stream) { console.log('[MP] no stream yet'); return; }
+    if (!stream) return;
 
-    let stopped  = false;
-    let hands    = null;
-    let rafId    = null;
+    let destroyed = false;
+    let animId    = null;
+    let hands     = null;
 
-    async function init() {
-      const video = videoRef.current;
-      const canvas = canvasRef.current;
+    (async () => {
+      // ── 1. point hidden video at the live stream ──────────────────────────
+      const vid = videoRef.current;
+      if (!vid) return;
+      vid.srcObject   = stream;
+      vid.muted       = true;
+      vid.playsInline = true;
+      try { await vid.play(); } catch (_) {}
 
-      if (!video)  { console.error('[MP] videoRef not mounted');  return; }
-      if (!canvas) { console.error('[MP] canvasRef not mounted'); return; }
-
-      console.log('[MP] attaching stream to video...');
-      video.srcObject = stream;
-      video.muted     = true;
-      video.playsInline = true;
-
-      try {
-        await video.play();
-        console.log('[MP] video playing, w×h =', video.videoWidth, video.videoHeight);
-      } catch(e) {
-        console.error('[MP] video.play() failed:', e);
-      }
-
-      // Wait until we have real frame dimensions
-      let waited = 0;
-      while ((video.videoWidth === 0 || video.videoHeight === 0) && waited < 5000) {
+      // wait up to 5 s for real frame data
+      for (let i = 0; i < 50 && vid.videoWidth === 0; i++) {
         await new Promise(r => setTimeout(r, 100));
-        waited += 100;
       }
-      console.log('[MP] video ready, w×h =', video.videoWidth, video.videoHeight);
+      if (destroyed || vid.videoWidth === 0) return;
 
-      if (stopped) return;
-
-      console.log('[MP] loading MediaPipe...');
+      // ── 2. load + configure MediaPipe ────────────────────────────────────
       const { Hands, HAND_CONNECTIONS }       = await import('@mediapipe/hands');
       const { drawConnectors, drawLandmarks } = await import('@mediapipe/drawing_utils');
-      console.log('[MP] MediaPipe loaded');
 
       hands = new Hands({
-        locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
+        locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
       });
-
       hands.setOptions({
         maxNumHands: 1,
         modelComplexity: 0,
         minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5,
+        minTrackingConfidence:  0.5,
       });
 
-      hands.onResults((results) => {
-        if (!canvas || !video) return;
+      // ── 3. results callback ───────────────────────────────────────────────
+      hands.onResults(results => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
         const ctx = canvas.getContext('2d');
-        canvas.width  = video.videoWidth  || 640;
-        canvas.height = video.videoHeight || 480;
+        canvas.width  = vid.videoWidth;
+        canvas.height = vid.videoHeight;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
         const hasHand = results.multiHandLandmarks?.length > 0;
         if (hasHand) {
-          console.log('[MP] HAND DETECTED');
           const lm = results.multiHandLandmarks[0];
-          drawConnectors(ctx, lm, HAND_CONNECTIONS, { color: 'rgba(99,179,237,0.9)', lineWidth: 3 });
-          drawLandmarks(ctx, lm,  { color: '#ff4444', lineWidth: 2, radius: 5 });
+          drawConnectors(ctx, lm, HAND_CONNECTIONS,
+            { color: 'rgba(99,179,237,0.85)', lineWidth: 2 });
+          drawLandmarks(ctx, lm,
+            { color: '#63b3ed', lineWidth: 1, radius: 4 });
         }
-
-        onResultsRef.current({ hasHand, landmarks: hasHand ? results.multiHandLandmarks[0] : null });
+        // always fire — CallRoom decides what to do based on `detecting` state
+        onResultsRef.current({
+          hasHand,
+          landmarks: hasHand ? results.multiHandLandmarks[0] : null,
+        });
       });
 
-      console.log('[MP] initializing hands model...');
       await hands.initialize();
-      console.log('[MP] hands model ready — starting loop');
+      if (destroyed) return;
 
-      async function loop() {
-        if (stopped) return;
-        try {
-          if (video.readyState >= 2 && video.videoWidth > 0) {
-            await hands.send({ image: video });
-          }
-        } catch(e) {
-          console.error('[MP] send error:', e);
+      // ── 4. drive with requestAnimationFrame ──────────────────────────────
+      const tick = async () => {
+        if (destroyed) return;
+        if (vid.readyState >= 2 && vid.videoWidth > 0) {
+          try { await hands.send({ image: vid }); } catch (_) {}
         }
-        rafId = requestAnimationFrame(loop);
-      }
-
-      loop();
-    }
-
-    init();
+        animId = requestAnimationFrame(tick);
+      };
+      tick();
+    })();
 
     return () => {
-      console.log('[MP] cleanup');
-      stopped = true;
-      if (rafId) cancelAnimationFrame(rafId);
+      destroyed = true;
+      if (animId) cancelAnimationFrame(animId);
       hands?.close?.();
     };
-  }, [stream]);
+  }, [stream]); // ← only re-init when stream object changes
 
   return { videoRef, canvasRef };
 }
